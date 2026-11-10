@@ -387,17 +387,37 @@ static void drawText(NSString* s, NSRect r, CGFloat size, NSColor* c, BOOL bold)
     listScroll.hasVerticalScroller = YES;
     listScroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     self.table = [[NSTableView alloc] initWithFrame:listScroll.bounds];
+    // Size the detail columns to their widest entry (capped, so one long zoom range or mount
+    // name cannot squeeze the lens names), and let the name column take the rest. Fixed widths
+    // that ignored the gap between columns pushed the Data column past the right edge.
+    NSDictionary* cellFont = @{NSFontAttributeName: [NSFont systemFontOfSize:NSFont.systemFontSize]};
+    auto fitWidth = [&](NSString* title, CGFloat cap, std::string (^value)(size_t)) {
+        CGFloat w = [title sizeWithAttributes:cellFont].width;
+        std::set<std::string> seen;
+        for (size_t i = 0; i < _all.size(); i++)
+        {
+            std::string v = value(i);
+            if (seen.insert(v).second) w = std::max(w, [NS(v) sizeWithAttributes:cellFont].width);
+        }
+        return std::ceil(std::min(w, cap)) + 8;
+    };
+    CGFloat focalW = fitWidth(@"Focal", 110, ^std::string(size_t i) { return _facts[i].focal; });
+    CGFloat mountW = fitWidth(@"Mount", 90, ^std::string(size_t i) { return _all[i]->mount; });
+    CGFloat traitsW = fitWidth(@"Data", 220, ^std::string(size_t i) { return _facts[i].traits; });
     struct { NSString* ident; NSString* title; CGFloat width; } cols[] = {
-        {@"name", @"Lens", listW - 380}, {@"focal", @"Focal", 118}, {@"mount", @"Mount", 92}, {@"traits", @"Data", 170}};
+        {@"name", @"Lens", 200}, {@"focal", @"Focal", focalW}, {@"mount", @"Mount", mountW}, {@"traits", @"Data", traitsW}};
     for (auto& c : cols)
     {
         NSTableColumn* col = [[NSTableColumn alloc] initWithIdentifier:c.ident];
         col.title = c.title;
         col.width = c.width;
+        col.minWidth = [c.ident isEqualToString:@"name"] ? 160 : 40;
         col.resizingMask = [c.ident isEqualToString:@"name"] ? NSTableColumnAutoresizingMask : NSTableColumnUserResizingMask;
         [self.table addTableColumn:col];
     }
     self.table.columnAutoresizingStyle = NSTableViewFirstColumnOnlyAutoresizingStyle;
+    self.table.allowsExpansionToolTips = YES;   // hover shows the full text of a truncated cell
+    self.table.style = NSTableViewStyleFullWidth;  // keep edge-to-edge rows; Automatic switches to inset
     self.table.rowHeight = 22;
     self.table.usesAlternatingRowBackgroundColors = YES;
     self.table.dataSource = self;
@@ -406,6 +426,7 @@ static void drawText(NSString* s, NSRect r, CGFloat size, NSColor* c, BOOL bold)
     self.table.doubleAction = @selector(useLens:);
     listScroll.documentView = self.table;
     [root addSubview:listScroll];
+    [self.table sizeToFit];   // fit all columns inside the visible list, resizing the name column
 
     // Preview
     self.preview = [[LCLensPreview alloc] initWithFrame:NSMakeRect(W - pad - preview, bottom, preview, H - bottom - top + 38)];
@@ -622,7 +643,25 @@ bool snapshotLensBrowser(const BrowserRequest& p_Request, const std::string& p_C
         NSBitmapImageRep* rep = [v bitmapImageRepForCachingDisplayInRect:v.bounds];
         if (!rep) return false;
         [v cacheDisplayInRect:v.bounds toBitmapImageRep:rep];
-        NSData* png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+
+        // The content view has no background of its own (on screen the window frame draws it),
+        // so composite onto the panel's window colour; otherwise the dark-appearance text and
+        // button titles are white on transparent and the snapshot looks blank.
+        NSBitmapImageRep* out = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL
+            pixelsWide:rep.pixelsWide pixelsHigh:rep.pixelsHigh bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES
+            isPlanar:NO colorSpaceName:NSCalibratedRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
+        if (!out) return false;
+        out.size = rep.size;
+        [NSGraphicsContext saveGraphicsState];
+        NSGraphicsContext.currentContext = [NSGraphicsContext graphicsContextWithBitmapImageRep:out];
+        [c.panel.appearance performAsCurrentDrawingAppearance:^{
+            [NSColor.windowBackgroundColor setFill];
+            NSRectFill(NSMakeRect(0, 0, rep.size.width, rep.size.height));
+        }];
+        [rep drawInRect:NSMakeRect(0, 0, rep.size.width, rep.size.height) fromRect:NSZeroRect
+              operation:NSCompositingOperationSourceOver fraction:1.0 respectFlipped:NO hints:nil];
+        [NSGraphicsContext restoreGraphicsState];
+        NSData* png = [out representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
         return [png writeToFile:NS(p_PngPath) atomically:YES];
     }
 }
