@@ -22,6 +22,17 @@ OBJS     = build/LensCharacterPlugin.o build/Profiles.o build/Mixer.o build/Meta
 all: $(BUNDLE)
 
 # The SDK lives under a path with spaces, which make cannot handle; link it into build/.
+# The link has to exist before make starts looking for sources: make 3.81 (the one macOS
+# ships) caches directory listings, so a link created mid-run is invisible to the pattern
+# rules and a clean build fails with "No rule to make target build/ofxsCore.o".
+# Skipped for clean and install, so `sudo make install` never creates root-owned files.
+ifneq ($(if $(MAKECMDGOALS),$(filter-out clean install,$(MAKECMDGOALS)),all),)
+  SDK_OK := $(shell test -d "$(OFX_SDK)/Support/Library" && mkdir -p build && ln -sfn "$(OFX_SDK)" $(SDK) && echo yes)
+  ifneq ($(SDK_OK),yes)
+    $(error OpenFX SDK not found at "$(OFX_SDK)". Install DaVinci Resolve, or pass OFX_SDK=/path/to/OpenFX)
+  endif
+endif
+
 build:
 	mkdir -p build
 	ln -sfn "$(OFX_SDK)" $(SDK)
