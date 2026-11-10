@@ -28,10 +28,10 @@ To uninstall, open `/Library/OFX/Plugins` in Finder (⌘⇧G) and move `LensChar
 
 ## Quick start
 
-1. Add **LensCharacter** to a clip and set **Input Encoding** to match your timeline: *Gamma 2.4* for a standard Rec.709 project, *DaVinci Intermediate* if you're colour managed.
+1. Add **LensCharacter** to a clip and set **Input Encoding** to match your timeline: *Gamma 2.4* for a standard Rec.709 project, *DaVinci Intermediate* if you're colour managed. Put it early in the node tree, after the input colour transform and before grades, LUTs and film emulation, so highlights still carry their full brightness.
 2. Click **Choose Lens…** and pick a lens. Choosing a lens sets **Aperture** wide open.
 3. Use the **Look** sliders to scale each trait: 1 is the real lens, 0 turns it off, higher values overdrive it. Measured primes are subtle, so try 5–20 on Distortion and Chromatic Aberration to see them clearly.
-4. Use **Focus** to set how much blur there is and where. Bokeh shape and swirl appear in the blurred areas and toward the corners.
+4. Use **Focus** to set how much blur there is and where. Bokeh shape and swirl appear in the blurred areas and toward the corners. **Sharp Area Softness** adds a slight defocus to the sharp area too, for footage that looks too crisp.
 5. For playback, set **Quality** to *Fast* or *Geometry Only*. Set it back to *Full* before you deliver.
 
 The plugin has no depth information. Blur goes by position (sharp centre, soft edges) or by the clip's alpha channel.

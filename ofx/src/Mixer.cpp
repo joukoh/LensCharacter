@@ -14,6 +14,15 @@ namespace lc {
 
 static const float kIdeal[5] = {1.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 
+// Highlight weight levels off at 1 + boost * kHighlightCap (see hlWeight in LensKernel.h)
+static const float kHighlightCap = 16.0f;
+// Pyramid level = log2(gap between bokeh samples) + kMipBias; tuned on a scene of small
+// scene-referred lights so discs fill in without softening their edges more than needed
+static const float kMipBias = 0.5f;
+// The same for the glow halo (which also takes more samples than it used to, 32, because it is
+// only a few sample gaps wide)
+static const float kGlowMipBias = 0.5f;
+
 float softLimit(float x, float budget)
 {
     if (budget <= 0.0f) return 0.0f;
@@ -272,7 +281,7 @@ LCParams buildParams(const FrameSettings& s)
         auto D = [&](float va, float vb, float id) { return (va - id) * (1.0f - m) + (vb - id) * m; };
 
         const Character& dominant = m < 0.5f ? A : B;
-        P.blades = dominant.blades;
+        P.blades = std::round(dominant.blades);   // whole blades; the kernel's wrapped blade phase relies on it
         P.rotation = dominant.rotation;
         P.curve = A.curve * (1.0f - m) + B.curve * m;
         P.catEye = driveValue(0.0f, D(A.catEye, B.catEye, 0.0f), x, 1.5f, u);
@@ -307,6 +316,7 @@ LCParams buildParams(const FrameSettings& s)
 
     // Defocus
     P.defocusPx = s.defocus * 0.005f * H * blurScale;
+    P.focusFloorPx = std::max(0.0f, s.focusFloor) * 0.005f * H * blurScale;
     P.edgeBlurPx = 0.012f * H * blurScale;   // field 1.0 → 1.2% of frame height at the corner (≈26 px at UHD)
     P.focusMode = s.focusMode;
     P.focusRadius = s.focusRadius;
@@ -315,22 +325,30 @@ LCParams buildParams(const FrameSettings& s)
     P.hlThresh = s.hlThresh;
     P.samples = std::max(8, std::min(512, s.samples));
     P.adaptiveSamples = 1;
-    P.glowSamples = 16;
+    P.glowSamples = 32;
     P.decodeOnFetch = 0;   // the Metal path linearizes first; the CPU path turns this on
 
     // Playback quality
     if (s.quality == QUALITY_FAST)
     {
         P.samples = std::max(16, P.samples / 3);
-        P.glowSamples = 8;
+        P.glowSamples = 16;
     }
     else if (s.quality == QUALITY_GEOMETRY)
     {
         P.defocusPx = 0.0f;
+        P.focusFloorPx = 0.0f;
         P.edgeBlurPx = 0.0f;
         P.glow = 0.0f;
         P.veil = 0.0f;
     }
+
+    // Prefiltered sampling: only worth building the pyramid when something blurs
+    P.hlCap = kHighlightCap;
+    P.mipBias = kMipBias;
+    P.glowMipBias = kGlowMipBias;
+    bool blurs = P.defocusPx > 0.0f || P.focusFloorPx > 0.0f || (P.edgeBlurPx > 0.0f && P.field != 0.0f) || P.glow > 0.0f || P.veil > 0.0f;
+    planMips(P, blurs ? LC_MAX_MIPS : 0);
     return P;
 }
 

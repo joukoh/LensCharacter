@@ -1,9 +1,11 @@
 // MetalKernel.mm — compiles LensKernel.h as Metal Shading Language at runtime and dispatches it.
 // No offline Metal compiler is needed; pipelines are built once per command queue and cached.
 //
-// Two passes per frame:
+// Passes per frame:
 //   1. linearize: decode the clip's transfer function once into a scratch buffer
-//   2. lens:      the full simulation, reading already-linear pixels
+//   2. mips:      build the weighted pyramid the bokeh and glow read from, one level per dispatch
+//                 (skipped when nothing blurs)
+//   3. lens:      the full simulation, reading already-linear pixels
 // Decoding once instead of per sample removes a pow()/exp2() from every one of the
 // hundreds of reads each output pixel makes.
 
@@ -41,13 +43,34 @@ kernel void LensLinearizeKernel(constant lc::LCParams& P [[buffer(1)]],
     dst[i + 3] = src[i + 3];
 }
 
+kernel void LensMipKernel(constant lc::LCParams& P [[buffer(1)]],
+                          const device float* src [[buffer(0)]],
+                          device float* mips [[buffer(2)]],
+                          constant int& level [[buffer(3)]],
+                          uint2 id [[thread_position_in_grid]])
+{
+    int k = level;
+    int w = P.mipW[k - 1];
+    if ((int)id.x >= w || (int)id.y >= P.mipH[k - 1]) return;
+    int i = P.mipOffset[k - 1] + ((int)id.y * w + (int)id.x) * 8;
+    for (int set = 0; set < 2; set++)
+    {
+        lc::LCColor c = lc::mipBuildTexel(src, mips, P, k, (int)id.x, (int)id.y, set);
+        mips[i + set * 4 + 0] = c.r;
+        mips[i + set * 4 + 1] = c.g;
+        mips[i + set * 4 + 2] = c.b;
+        mips[i + set * 4 + 3] = c.a;
+    }
+}
+
 kernel void LensCharacterKernel(constant lc::LCParams& P [[buffer(1)]],
                                 const device float* src [[buffer(0)]],
+                                const device float* mips [[buffer(2)]],
                                 device float* dst [[buffer(8)]],
                                 uint2 id [[thread_position_in_grid]])
 {
     if ((int)id.x >= P.width || (int)id.y >= P.height) return;
-    lc::LCColor c = lc::shade(P, src, (int)id.x, (int)id.y);
+    lc::LCColor c = lc::shade(P, src, mips, (int)id.x, (int)id.y);
     int i = ((int)id.y * P.width + (int)id.x) * 4;
     dst[i + 0] = c.r;
     dst[i + 1] = c.g;
@@ -60,7 +83,9 @@ struct QueueState
 {
     id<MTLComputePipelineState> lens = nil;
     id<MTLComputePipelineState> linearize = nil;
+    id<MTLComputePipelineState> mip = nil;
     id<MTLBuffer> scratch = nil;   // linear copy of the source frame, reused while the size fits
+    id<MTLBuffer> mips = nil;      // bokeh pyramid, reused while the size fits
 };
 
 static std::mutex s_Mutex;
@@ -96,23 +121,48 @@ static QueueState& stateFor(id<MTLCommandQueue> queue)
     }
     st.lens = makePipeline(device, library, @"LensCharacterKernel");
     st.linearize = makePipeline(device, library, @"LensLinearizeKernel");
+    st.mip = makePipeline(device, library, @"LensMipKernel");
     [library release];
     return st;
 }
 
+static void dispatchGrid(id<MTLComputeCommandEncoder> enc, id<MTLComputePipelineState> pipeline, int gw, int gh)
+{
+    NSUInteger w = pipeline.threadExecutionWidth;
+    NSUInteger h = pipeline.maxTotalThreadsPerThreadgroup / w;
+    if (h > 8) h = 8;   // short, wide groups keep neighbouring pixels (and their samples) together
+    [enc dispatchThreadgroups:MTLSizeMake((gw + w - 1) / w, (gh + h - 1) / h, 1)
+        threadsPerThreadgroup:MTLSizeMake(w, h, 1)];
+}
+
 static void dispatch(id<MTLCommandBuffer> cmd, id<MTLComputePipelineState> pipeline, const lc::LCParams& P,
-                     id<MTLBuffer> src, id<MTLBuffer> dst)
+                     id<MTLBuffer> src, id<MTLBuffer> dst, id<MTLBuffer> mips)
 {
     id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
     [enc setComputePipelineState:pipeline];
     [enc setBuffer:src offset:0 atIndex:0];
+    [enc setBuffer:(mips ? mips : src) offset:0 atIndex:2];   // unread when P.mipLevels is 0
     [enc setBuffer:dst offset:0 atIndex:8];
     [enc setBytes:&P length:sizeof(lc::LCParams) atIndex:1];
-    NSUInteger w = pipeline.threadExecutionWidth;
-    NSUInteger h = pipeline.maxTotalThreadsPerThreadgroup / w;
-    if (h > 8) h = 8;   // short, wide groups keep neighbouring pixels (and their samples) together
-    [enc dispatchThreadgroups:MTLSizeMake((P.width + w - 1) / w, (P.height + h - 1) / h, 1)
-        threadsPerThreadgroup:MTLSizeMake(w, h, 1)];
+    dispatchGrid(enc, pipeline, P.width, P.height);
+    [enc endEncoding];
+}
+
+// Builds pyramid levels 1..P.mipLevels from the (linear or still-encoded) source.
+// Dispatches in one encoder run in order, so each level sees the one before it complete.
+static void dispatchMips(id<MTLCommandBuffer> cmd, id<MTLComputePipelineState> pipeline, const lc::LCParams& P,
+                         id<MTLBuffer> src, id<MTLBuffer> mips)
+{
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoderWithDispatchType:MTLDispatchTypeSerial];
+    [enc setComputePipelineState:pipeline];
+    [enc setBuffer:src offset:0 atIndex:0];
+    [enc setBuffer:mips offset:0 atIndex:2];
+    [enc setBytes:&P length:sizeof(lc::LCParams) atIndex:1];
+    for (int k = 1; k <= P.mipLevels; k++)
+    {
+        [enc setBytes:&k length:sizeof(int) atIndex:3];
+        dispatchGrid(enc, pipeline, P.mipW[k - 1], P.mipH[k - 1]);
+    }
     [enc endEncoding];
 }
 
@@ -120,14 +170,26 @@ static void dispatch(id<MTLCommandBuffer> cmd, id<MTLComputePipelineState> pipel
 static id<MTLCommandBuffer> encodeFrame(id<MTLCommandQueue> queue, const lc::LCParams& p_Params, id<MTLBuffer> src, id<MTLBuffer> dst)
 {
     lc::LCParams P = p_Params;
-    id<MTLBuffer> scratch = nil;
-    id<MTLComputePipelineState> lens = nil, linearize = nil;
+    id<MTLBuffer> scratch = nil, mips = nil;
+    id<MTLComputePipelineState> lens = nil, linearize = nil, mip = nil;
     {
         std::lock_guard<std::mutex> lock(s_Mutex);
         QueueState& st = stateFor(queue);
         lens = st.lens;
         linearize = st.linearize;
+        mip = st.mip;
         if (!lens) return nil;
+        if (P.mipLevels > 0 && mip)
+        {
+            NSUInteger bytes = (NSUInteger)P.mipFloats * sizeof(float);
+            if (!st.mips || st.mips.length < bytes)
+            {
+                [st.mips release];
+                st.mips = [queue.device newBufferWithLength:bytes options:MTLResourceStorageModePrivate];
+            }
+            mips = st.mips;
+        }
+        if (!mips) P.mipLevels = 0;   // pipeline or allocation failed: fall back to point samples
         if (P.encoding != lc::ENC_LINEAR && P.decodeOnFetch == 0 && linearize)
         {
             NSUInteger bytes = (NSUInteger)P.width * P.height * 4 * sizeof(float);
@@ -144,13 +206,15 @@ static id<MTLCommandBuffer> encodeFrame(id<MTLCommandQueue> queue, const lc::LCP
     cmd.label = @"LensCharacter";
     if (scratch)
     {
-        dispatch(cmd, linearize, P, src, scratch);
-        dispatch(cmd, lens, P, scratch, dst);
+        dispatch(cmd, linearize, P, src, scratch, nil);
+        if (mips) dispatchMips(cmd, mip, P, scratch, mips);
+        dispatch(cmd, lens, P, scratch, dst, mips);
     }
     else
     {
         P.decodeOnFetch = 1;
-        dispatch(cmd, lens, P, src, dst);
+        if (mips) dispatchMips(cmd, mip, P, src, mips);
+        dispatch(cmd, lens, P, src, dst, mips);
     }
     [cmd commit];
     return cmd;

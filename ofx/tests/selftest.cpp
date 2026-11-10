@@ -70,10 +70,12 @@ static std::vector<float> renderCPU(const lc::LCParams& p_Params, const std::vec
     lc::LCParams P = p_Params;
     P.decodeOnFetch = 1;
     std::vector<float> out(src.size());
+    std::vector<float> mips((size_t)P.mipFloats + 4);
+    lc::buildMips(P, src.data(), mips.data());
     for (int y = 0; y < P.height; y++)
         for (int x = 0; x < P.width; x++)
         {
-            lc::LCColor c = lc::shade(P, src.data(), x, y);
+            lc::LCColor c = lc::shade(P, src.data(), mips.data(), x, y);
             float* d = &out[((size_t)y * P.width + x) * 4];
             d[0] = c.r; d[1] = c.g; d[2] = c.b; d[3] = c.a;
         }
@@ -207,6 +209,144 @@ int main(int argc, char** argv)
         CHECK(std::fabs(f4.defocusPx / wide.defocusPx - 0.5f) < 1e-4f, "f/4 on an f/2 lens halves the blur (%.1f px -> %.1f px)", wide.defocusPx, f4.defocusPx);
         CHECK(f4.catEye < wide.catEye && f11.catEye < 0.05f, "cat-eye fades when stopping down (%.2f -> %.2f -> %.2f)", wide.catEye, f4.catEye, f11.catEye);
         CHECK(f4.curve < wide.curve, "iris blades show more when stopped down (curvature %.2f -> %.2f)", wide.curve, f4.curve);
+    }
+
+    printf("Sharp Area Softness\n");
+    {
+        lc::FrameSettings f = s;   // Sharp Centre, Defocus 4
+        lc::LCParams sharp = lc::buildParams(f);
+        f.focusFloor = 0.5f;
+        lc::LCParams soft = lc::buildParams(f);
+        std::vector<float> a = renderCPU(sharp, chart), c = renderCPU(soft, chart);
+        auto meanDiff = [&](int x0, int y0, int n) {
+            double d = 0;
+            for (int y = y0; y < y0 + n; y++)
+                for (int x = x0; x < x0 + n; x++)
+                    for (int ch = 0; ch < 3; ch++) d += std::fabs(a[((size_t)y * W + x) * 4 + ch] - c[((size_t)y * W + x) * 4 + ch]);
+            return d / (n * n * 3);
+        };
+        double centre = meanDiff(W / 2 - 40, H / 2 - 40, 80), corner = meanDiff(0, 0, 40);
+        CHECK(centre > 1e-3 && corner < 1e-6, "softens the sharp centre (mean change %.4f) and leaves the defocused corners as they were (%.1e)",
+              centre, corner);
+    }
+
+    // Small scene-referred lights at large defocus. With point samples only, each light
+    // showed up as a disc of separate dots (one per bokeh sample); the pyramid fills it in.
+    printf("Bokeh from small bright lights (DaVinci Intermediate)\n");
+    {
+        std::vector<float> scene((size_t)W * H * 4);
+        for (size_t i = 0; i < (size_t)W * H; i++) { scene[i*4+0] = 0.33f; scene[i*4+1] = 0.35f; scene[i*4+2] = 0.37f; scene[i*4+3] = 1.0f; }
+        // Same 3×3 light (≈39× white) at different offsets on the pixel grid
+        const int lx[3] = {W / 2 - 150, W / 2, W / 2 + 151}, ly[3] = {H / 2, H / 2 + 1, H / 2 - 1};
+        for (int n = 0; n < 3; n++)
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    float* p = &scene[((size_t)(ly[n] + dy) * W + lx[n] + dx) * 4];
+                    p[0] = 0.90f; p[1] = 0.89f; p[2] = 0.86f;
+                }
+        lc::FrameSettings b = s;
+        b.encoding = lc::ENC_DAVINCI_INTERMEDIATE;
+        b.focusMode = lc::FOCUS_UNIFORM;
+        b.defocus = 20.0f;   // the slider's maximum
+        b.samples = 96;
+        b.glowScale = 0.0f;   // the bokeh alone; glow adds a bright core over each light
+        for (lc::Slot* sl : {&b.distortion, &b.ca, &b.vignetting, &b.character}) sl->overdrive = 1.0f;
+
+        // Evenness inside each disc: coefficient of variation of linear luma over its inner 60%
+        auto measure = [&](const std::vector<float>& img, float radius, double* cvMax, double* meanSpread) {
+            double means[3], worst = 0;
+            for (int n = 0; n < 3; n++)
+            {
+                double sum = 0, sum2 = 0;
+                int count = 0, R = (int)(radius * 0.6f);
+                for (int y = ly[n] - R; y <= ly[n] + R; y++)
+                    for (int x = lx[n] - R; x <= lx[n] + R; x++)
+                    {
+                        if ((x - lx[n]) * (x - lx[n]) + (y - ly[n]) * (y - ly[n]) > R * R) continue;
+                        const float* p = &img[((size_t)y * W + x) * 4];
+                        double v = lc::luma(lc::decode(b.encoding, p[0]), lc::decode(b.encoding, p[1]), lc::decode(b.encoding, p[2]));
+                        sum += v; sum2 += v * v; count++;
+                    }
+                double mean = sum / count, var = std::max(0.0, sum2 / count - mean * mean);
+                means[n] = mean;
+                worst = std::max(worst, std::sqrt(var) / mean);
+            }
+            double lo = std::min(means[0], std::min(means[1], means[2])), hi = std::max(means[0], std::max(means[1], means[2]));
+            *cvMax = worst;
+            *meanSpread = (hi - lo) / lo;
+        };
+
+        // Helios: evenness with real character (cat-eye, swirl, 8 blades). Plain lens (all
+        // traits off): the three lights differ only in where they sit on the pixel grid, so
+        // their discs must match.
+        for (int plain = 0; plain < 2; plain++)
+            for (float boost : {3.0f, 0.0f})
+            {
+                lc::FrameSettings c = b;
+                c.hlBoost = boost;
+                if (plain)
+                    for (lc::Slot* sl : {&c.distortion, &c.ca, &c.vignetting, &c.character}) sl->overdrive = 0.0f;
+                lc::LCParams Pb = lc::buildParams(c);
+                lc::LCParams Pold = Pb;
+                Pold.mipLevels = 0;   // the old point sampling, for comparison
+                std::vector<float> gpuB(scene.size());
+                int rcB = LensCharacterRunMetalTest(Pb, scene.data(), gpuB.data());
+                std::vector<float> cpuB = renderCPU(Pb, scene), oldB = renderCPU(Pold, scene);
+                double cvNew, spreadNew, cvOld, spreadOld, cvGpu, spreadGpu;
+                measure(cpuB, Pb.defocusPx, &cvNew, &spreadNew);
+                measure(oldB, Pb.defocusPx, &cvOld, &spreadOld);
+                measure(gpuB, Pb.defocusPx, &cvGpu, &spreadGpu);
+                const char* lens = plain ? "plain lens" : "Helios";
+                CHECK(rcB == 0 && cvNew < 0.10 && cvGpu < 0.10 && cvNew < cvOld * 0.25,
+                      "%s, Highlight Boost %.0f: variation inside the disc %.1f%% CPU, %.1f%% Metal (point samples: %.1f%%)",
+                      lens, boost, cvNew * 100, cvGpu * 100, cvOld * 100);
+                if (plain)
+                    CHECK(spreadNew < 0.03 && spreadGpu < 0.03,
+                          "%s, Highlight Boost %.0f: same light at three pixel offsets, discs within %.1f%% (point samples: %.1f%%)",
+                          lens, boost, std::max(spreadNew, spreadGpu) * 100, spreadOld * 100);
+                if (!plain && boost == 0.0f)
+                {
+                    writePPM(outDir + "/bokeh_lights_old.ppm", oldB, W, H);
+                    writePPM(outDir + "/bokeh_lights_new.ppm", gpuB, W, H);
+                }
+            }
+
+        // Glow alone (no blur): the halo around each light must not depend on its pixel offset.
+        // Gamma 2.4 still gives highlights extra weight in the glow; scene-referred input does not.
+        for (int enc : {lc::ENC_DAVINCI_INTERMEDIATE, lc::ENC_GAMMA24})
+        {
+            lc::FrameSettings c = b;
+            c.encoding = enc;
+            c.defocus = 0.0f;
+            for (lc::Slot* sl : {&c.distortion, &c.ca, &c.vignetting, &c.character}) sl->overdrive = 0.0f;
+            lc::LCParams Pg = lc::buildParams(c);
+            Pg.glow = 0.5f;
+            lc::planMips(Pg, LC_MAX_MIPS);
+            std::vector<float> gpuG(scene.size());
+            int rcG = LensCharacterRunMetalTest(Pg, scene.data(), gpuG.data());
+            std::vector<float> cpuG = renderCPU(Pg, scene);
+            auto halo = [&](const std::vector<float>& img, int n) {
+                double e = 0;
+                for (int y = ly[n] - 12; y <= ly[n] + 12; y++)
+                    for (int x = lx[n] - 12; x <= lx[n] + 12; x++)
+                    {
+                        if (std::abs(x - lx[n]) <= 1 && std::abs(y - ly[n]) <= 1) continue;   // the light itself
+                        const float* p = &img[((size_t)y * W + x) * 4];
+                        e += lc::luma(lc::decode(c.encoding, p[0]), lc::decode(c.encoding, p[1]), lc::decode(c.encoding, p[2]));
+                    }
+                return e;
+            };
+            double worst = 0;
+            for (const std::vector<float>* img : {&cpuG, &gpuG})
+            {
+                double e0 = halo(*img, 0), e1 = halo(*img, 1), e2 = halo(*img, 2);
+                double lo = std::min(e0, std::min(e1, e2)), hi = std::max(e0, std::max(e1, e2));
+                worst = std::max(worst, (hi - lo) / lo);
+            }
+            CHECK(rcG == 0 && worst < 0.02, "glow, %s: same light at three pixel offsets, halos within %.2f%%",
+                  enc == lc::ENC_GAMMA24 ? "Gamma 2.4" : "DaVinci Intermediate", worst * 100);
+        }
     }
 
     printf("Lens browser\n");

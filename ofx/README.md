@@ -6,7 +6,7 @@ GPU lens emulation for DaVinci Resolve (macOS, Apple Silicon, Metal). Architectu
 
 ```bash
 make            # builds build/LensCharacter.ofx.bundle
-make test       # library, overdrive-limit and CPU-vs-Metal checks; writes build/selftest_*.ppm
+make test       # library, overdrive-limit, CPU-vs-Metal and bokeh-evenness checks; writes build/*.ppm
 sudo make install
 ```
 

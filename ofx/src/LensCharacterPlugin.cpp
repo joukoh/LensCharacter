@@ -14,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "ofxsImageEffect.h"
 #include "ofxsMultiThread.h"
@@ -64,19 +65,33 @@ public:
 #endif
     }
 
+    // CPU path only: build the bokeh pyramid once, before the threads start
+    virtual void preProcess()
+    {
+        if (_isEnabledMetalRender || m_Params.mipLevels <= 0) return;
+        const OfxRectI& b = m_Src->getBounds();
+        const float* src = static_cast<const float*>(m_Src->getPixelAddress(b.x1, b.y1));
+        lc::LCParams params = m_Params;
+        params.decodeOnFetch = 1;
+        m_Mips.assign((size_t)params.mipFloats, 0.0f);
+        lc::buildMips(params, src, m_Mips.data());
+    }
+
     virtual void multiThreadProcessImages(OfxRectI p_Window)
     {
         const OfxRectI& b = m_Src->getBounds();
         const float* src = static_cast<const float*>(m_Src->getPixelAddress(b.x1, b.y1));
         lc::LCParams params = m_Params;
         params.decodeOnFetch = 1;   // no linear pre-pass on the CPU path
+        if (m_Mips.size() < (size_t)params.mipFloats) params.mipLevels = 0;
+        const float* mips = m_Mips.data();
         for (int y = p_Window.y1; y < p_Window.y2; ++y)
         {
             if (_effect.abort()) break;
             float* dst = static_cast<float*>(_dstImg->getPixelAddress(p_Window.x1, y));
             for (int x = p_Window.x1; x < p_Window.x2; ++x, dst += 4)
             {
-                lc::LCColor c = lc::shade(params, src, x - b.x1, y - b.y1);
+                lc::LCColor c = lc::shade(params, src, mips, x - b.x1, y - b.y1);
                 dst[0] = c.r; dst[1] = c.g; dst[2] = c.b; dst[3] = c.a;
             }
         }
@@ -85,6 +100,7 @@ public:
 private:
     Image* m_Src;
     lc::LCParams m_Params;
+    std::vector<float> m_Mips;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -105,6 +121,7 @@ private:
     void refreshInfo();
     void chooseLens(double p_Time, int p_Slot);   // -1 = main lens
     void copyBaseIntoCustom(double p_Time);
+    void suggestHighlightBoost(double p_Time);
     void saveCustom(double p_Time);
 
     Clip* m_DstClip;
@@ -119,7 +136,7 @@ private:
     DoubleParam* m_LookGlow;
 
     DoubleParam* m_Defocus; ChoiceParam* m_FocusMode;
-    DoubleParam* m_FocusRadius; DoubleParam* m_FocusFalloff;
+    DoubleParam* m_FocusRadius; DoubleParam* m_FocusFalloff; DoubleParam* m_FocusFloor;
 
     SlotParams m_Slots[4];
 
@@ -152,6 +169,7 @@ LensCharacterPlugin::LensCharacterPlugin(OfxImageEffectHandle p_Handle)
     m_Defocus = fetchDoubleParam("defocus");
     m_FocusMode = fetchChoiceParam("focusMode");
     m_FocusRadius = fetchDoubleParam("focusRadius");
+    m_FocusFloor = fetchDoubleParam("focusFloor");
     m_FocusFalloff = fetchDoubleParam("focusFalloff");
 
     for (int i = 0; i < 4; i++)
@@ -398,6 +416,21 @@ void LensCharacterPlugin::changedParam(const InstanceChangedArgs& p_Args, const 
         return;
     }
     if (p_ParamName == "customName") refreshInfo();
+    if (p_ParamName == "encoding") suggestHighlightBoost(p_Args.time);
+}
+
+// Highlight Boost makes up for highlights that a display encoding clipped at 1.0; scene-referred
+// input still has them, and there 0 looks most natural. When the encoding changes, move the
+// slider to the value that suits it, unless the user has set their own (or keyframed it).
+void LensCharacterPlugin::suggestHighlightBoost(double p_Time)
+{
+    const double kDisplay = 3.0, kScene = 0.0;
+    if (m_HlBoost->getNumKeys() > 0) return;
+    double current = m_HlBoost->getValueAtTime(p_Time);
+    if (current != kDisplay && current != kScene) return;
+    int encoding = lc::ENC_GAMMA24;
+    m_Encoding->getValueAtTime(p_Time, encoding);
+    m_HlBoost->setValue(encoding == lc::ENC_GAMMA24 ? kDisplay : kScene);
 }
 
 // ---- render ----------------------------------------------------------------------------------
@@ -478,6 +511,7 @@ void LensCharacterPlugin::render(const RenderArguments& p_Args)
     s.defocus = (float)m_Defocus->getValueAtTime(t);
     m_FocusMode->getValueAtTime(t, s.focusMode);
     s.focusRadius = (float)m_FocusRadius->getValueAtTime(t);
+    s.focusFloor = (float)m_FocusFloor->getValueAtTime(t);
     s.focusFalloff = (float)m_FocusFalloff->getValueAtTime(t);
     s.hlBoost = (float)m_HlBoost->getValueAtTime(t);
     s.hlThresh = (float)m_HlThresh->getValueAtTime(t);
@@ -695,6 +729,7 @@ void LensCharacterFactory::describeInContext(ImageEffectDescriptor& p_Desc, Cont
     }
     ui.dbl("focusRadius", "Sharp Area Size", "Size of the sharp centre (Sharp Centre mode)", 0.25, 0, 1.5, 0, 1.5);
     ui.dbl("focusFalloff", "Focus Falloff", "How gradually blur builds outside the sharp area", 0.5, 0.01, 2, 0.01, 2);
+    ui.dbl("focusFloor", "Sharp Area Softness", "A slight defocus inside the sharp area (the in-focus part of the matte in the alpha modes), in the same units as Defocus; the blur rises from this to Defocus toward the edges. 0 keeps it fully sharp. Around 0.05–0.2 at UHD (twice that at HD) takes the digital edge off.", 0, 0, 40, 0, 1);
 
     // Mix & Match
     ui.beginGroup("grpMix", "Mix & Match", false);
@@ -721,9 +756,9 @@ void LensCharacterFactory::describeInContext(ImageEffectDescriptor& p_Desc, Cont
     }
     ui.boolean("autoFit", "Auto Zoom For Distortion", "Scale up slightly so barrel distortion never pulls in edges from outside the frame", true);
     ui.boolean("unbounded", "Unbounded Overdrive", "Removes the overdrive safety limits. Warps can fold over and colour channels can separate into ghosts.", false);
-    ui.dbl("hlBoost", "Highlight Boost", "Makes bright points dominate the blur so they bloom into bokeh balls", 3, 0, 40, 0, 20);
+    ui.dbl("hlBoost", "Highlight Boost", "Makes bright points dominate the blur so they bloom into bokeh balls, making up for highlights that Rec.709 clipped. DaVinci Intermediate and Linear input keep the real brightness, so 0 looks most natural there. Changing Input Encoding sets 3 or 0 to suit, unless you have chosen another value.", 3, 0, 40, 0, 20);
     ui.dbl("hlThresh", "Highlight Threshold", "Brightness (linear) where highlight boost begins", 0.7, 0, 10, 0, 2);
-    ui.integer("samples", "Bokeh Quality", "Samples per pixel. Raise for large defocus, lower for faster playback.", 96, 8, 512);
+    ui.integer("samples", "Bokeh Quality", "Samples per pixel. Higher gives crisper bokeh edges on large blurs; lower plays back faster.", 96, 8, 512);
 
     // Custom Lens
     ui.beginGroup("grpCustom", "Custom Lens", false);

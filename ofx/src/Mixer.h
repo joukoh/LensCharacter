@@ -32,6 +32,7 @@ struct FrameSettings
     float defocus = 0.0f;
     int focusMode = FOCUS_RADIAL;
     float focusRadius = 0.25f, focusFalloff = 0.5f;
+    float focusFloor = 0.0f;        // Sharp Area Softness: defocus inside the sharp area, same units as defocus
     float hlBoost = 3.0f, hlThresh = 0.7f;
     int samples = 96;
     int quality = 0;                // 0 Full, 1 Fast (playback), 2 Geometry Only
