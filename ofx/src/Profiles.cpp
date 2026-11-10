@@ -1,17 +1,14 @@
 // Profiles.cpp — lens profile library.
 #include "Profiles.h"
 
-#include <dirent.h>
-#include <dlfcn.h>
-#include <sys/stat.h>
-
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
-#include <fstream>
 #include <map>
 #include <sstream>
+
+#include "Platform.h"
 
 #include "../third_party/json.hpp"
 
@@ -21,46 +18,9 @@ namespace lc {
 
 // ---- paths ------------------------------------------------------------------------------
 
-static std::string bundleResourcesDir()
-{
-    // .../LensCharacter.ofx.bundle/Contents/MacOS/LensCharacter.ofx -> .../Contents/Resources
-    Dl_info info;
-    if (dladdr(reinterpret_cast<void*>(&bundleResourcesDir), &info) && info.dli_fname)
-    {
-        std::string p = info.dli_fname;
-        size_t slash = p.rfind('/');
-        if (slash != std::string::npos)
-        {
-            p = p.substr(0, slash);                 // .../Contents/MacOS
-            slash = p.rfind('/');
-            if (slash != std::string::npos)
-                return p.substr(0, slash) + "/Resources";
-        }
-    }
-    return std::string();
-}
-
 std::string Library::userDir()
 {
-    const char* home = std::getenv("HOME");
-    return std::string(home ? home : "") + "/Library/Application Support/LensCharacter/Profiles";
-}
-
-static std::vector<std::string> listJson(const std::string& dir)
-{
-    std::vector<std::string> out;
-    if (DIR* d = opendir(dir.c_str()))
-    {
-        while (dirent* e = readdir(d))
-        {
-            std::string n = e->d_name;
-            if (n.size() > 5 && n.substr(n.size() - 5) == ".json")
-                out.push_back(dir + "/" + n);
-        }
-        closedir(d);
-    }
-    std::sort(out.begin(), out.end());
-    return out;
+    return platform::join(platform::userDataDir(), "Profiles");
 }
 
 // ---- search ------------------------------------------------------------------------------
@@ -106,9 +66,9 @@ static void readArray(const json& j, float* out, int n, float fallback)
 
 void Library::loadFile(const std::string& path, std::vector<std::shared_ptr<Profile>>& into)
 {
-    std::ifstream f(path);
-    if (!f) return;
-    json doc = json::parse(f, nullptr, false);
+    std::string text;
+    if (!platform::readFile(path, text)) return;
+    json doc = json::parse(text, nullptr, false);
     if (doc.is_discarded()) return;
 
     // Accept a library file ({"profiles": [...]}) or a single profile object
@@ -193,10 +153,10 @@ void Library::reload()
 {
     std::vector<std::shared_ptr<Profile>> loaded;
     const char* overrideDir = std::getenv("LENSCHARACTER_PROFILES");   // used by the self-test
-    std::string builtinDir = overrideDir ? std::string(overrideDir) : bundleResourcesDir() + "/profiles";
-    for (const std::string& path : listJson(builtinDir))
+    std::string builtinDir = overrideDir ? std::string(overrideDir) : platform::join(platform::bundleResourcesDir(), "profiles");
+    for (const std::string& path : platform::listFiles(builtinDir, ".json"))
         loadFile(path, loaded);
-    for (const std::string& path : listJson(userDir()))
+    for (const std::string& path : platform::listFiles(userDir(), ".json"))
         loadFile(path, loaded);
 
     // User and built-in profiles first, so they win search ties against imported data
@@ -276,19 +236,6 @@ size_t Library::size() const
 
 // ---- saving --------------------------------------------------------------------------------
 
-static void mkdirs(const std::string& path)
-{
-    std::string cur;
-    std::istringstream ss(path);
-    std::string part;
-    while (std::getline(ss, part, '/'))
-    {
-        if (part.empty()) { cur = "/"; continue; }
-        cur += (cur.empty() || cur.back() == '/' ? "" : "/") + part;
-        mkdir(cur.c_str(), 0755);
-    }
-}
-
 bool Library::saveUserProfile(const Profile& p, std::string& outPath, std::string& outError)
 {
     std::string fname = normalizeForSearch(p.name);
@@ -315,12 +262,9 @@ bool Library::saveUserProfile(const Profile& p, std::string& outPath, std::strin
                       {"bokeh_fringe", c.loca}, {"glow", c.glow}, {"veil", c.veil}, {"squeeze", c.squeeze}, {"tint", c.tint}};
 
     std::string dir = userDir();
-    mkdirs(dir);
-    outPath = dir + "/" + fname + ".json";
-    std::ofstream f(outPath);
-    if (!f) { outError = "Could not write " + outPath; return false; }
-    f << j.dump(1);
-    f.close();
+    platform::makeDirs(dir);
+    outPath = platform::join(dir, fname + ".json");
+    if (!platform::writeFile(outPath, j.dump(1))) { outError = "Could not write " + outPath; return false; }
     reload();
     return true;
 }

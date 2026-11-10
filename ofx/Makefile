@@ -1,4 +1,5 @@
-# LensCharacter OpenFX plugin — macOS build (Apple Silicon), modelled on Resolve's GainPlugin sample.
+# LensCharacter OpenFX plugin — macOS build (universal), modelled on Resolve's GainPlugin sample.
+# Windows and Linux build with CMake instead: see CMakeLists.txt and WINDOWS.md.
 #
 #   make            build LensCharacter.ofx.bundle
 #   make test       build and run the CPU + Metal self-test
@@ -17,7 +18,7 @@ LDFLAGS  = -bundle -fvisibility=hidden $(ARCH) -framework Metal -framework Found
 BUNDLE   = build/LensCharacter.ofx.bundle
 SUPPORT  = ofxsCore ofxsImageEffect ofxsInteract ofxsLog ofxsMultiThread ofxsParams ofxsProperty ofxsPropertyValidation
 SUP_OBJS = $(SUPPORT:%=build/%.o)
-OBJS     = build/LensCharacterPlugin.o build/Profiles.o build/Mixer.o build/MetalKernel.o build/LensBrowser.o $(SUP_OBJS)
+OBJS     = build/LensCharacterPlugin.o build/Profiles.o build/Platform.o build/Mixer.o build/MetalKernel.o build/LensBrowser.o build/LensBrowserModel.o $(SUP_OBJS)
 
 all: $(BUNDLE)
 
@@ -61,7 +62,7 @@ $(BUNDLE): $(OBJS) resources/profiles/*.json resources/Info.plist
 	cp resources/profiles/*.json $(BUNDLE)/Contents/Resources/profiles/
 	cp resources/ATTRIBUTION.txt $(BUNDLE)/Contents/Resources/
 
-TEST_OBJS = build/Mixer.o build/Profiles.o build/MetalKernel.o build/LensBrowser.o
+TEST_OBJS = build/Mixer.o build/Profiles.o build/Platform.o build/MetalKernel.o build/LensBrowser.o build/LensBrowserModel.o
 
 build/selftest: tests/selftest.cpp $(TEST_OBJS) src/*.h | build
 	$(CXX) tests/selftest.cpp $(TEST_OBJS) -o $@ $(CXXFLAGS) -framework Metal -framework Foundation -framework Cocoa

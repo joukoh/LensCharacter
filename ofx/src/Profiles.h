@@ -63,7 +63,8 @@ public:
     std::vector<ProfilePtr> all() const;
     size_t size() const;
 
-    // ~/Library/Application Support/LensCharacter/Profiles
+    // <platform::userDataDir()>/Profiles, e.g. ~/Library/Application Support/LensCharacter/Profiles
+    // on macOS, %APPDATA%\LensCharacter\Profiles on Windows
     static std::string userDir();
     bool saveUserProfile(const Profile& p, std::string& outPath, std::string& outError);
 

@@ -1,9 +1,11 @@
-// LensKernel.h — the per-pixel lens simulation, shared by the CPU path and the Metal path.
+// LensKernel.h — the per-pixel lens simulation, shared by the CPU, Metal and CUDA paths.
 //
 // The CPU build #includes this file. The Metal build embeds this same text as a string
-// (see Makefile) and compiles it at runtime with LC_METAL defined, so both paths run
-// identical math. Keep to the subset both languages accept: scalar floats/ints, plain
-// structs, no recursion, no std:: containers.
+// (see Makefile) and compiles it at runtime with LC_METAL defined. CudaKernel.cu includes it
+// under nvcc (__CUDACC__), which turns every function into a device function. All three run
+// identical math. Keep to the subset every language accepts: scalar floats/ints, plain
+// structs, no recursion, no std:: containers, and math through the overloaded names
+// (sqrt, fmin, floor...) that C++, MSL and CUDA all provide for float.
 
 #ifndef LC_KERNEL_H
 #define LC_KERNEL_H
@@ -17,6 +19,15 @@
   #define LC_FCOS(x) metal::fast::cos(x)
   #define LC_FSIN(x) metal::fast::sin(x)
   #define LC_FSQRT(x) metal::fast::sqrt(x)
+#elif defined(__CUDACC__)
+  #define LC_CUDA 1
+  #define LC_CONST const
+  #define LC_SRC const float*
+  #define LC_FN static __device__ __forceinline__
+  // Built without --use_fast_math, for the same reason as Metal; intrinsics in the loops only.
+  #define LC_FCOS(x) __cosf(x)
+  #define LC_FSIN(x) __sinf(x)
+  #define LC_FSQRT(x) sqrtf(x)
 #else
   #include <cmath>
   #define LC_CONST const
@@ -29,7 +40,22 @@
 
 namespace lc {
 
-#ifndef LC_METAL
+#if defined(LC_CUDA)
+// Float versions by name, so device code never depends on which overloads the host compiler's
+// <cmath> declares (MSVC's differ from GCC's), and never promotes to double.
+LC_FN float sqrt(float x) { return sqrtf(x); }
+LC_FN float cos(float x) { return cosf(x); }
+LC_FN float sin(float x) { return sinf(x); }
+LC_FN float floor(float x) { return floorf(x); }
+LC_FN float fabs(float x) { return fabsf(x); }
+LC_FN float fmax(float a, float b) { return fmaxf(a, b); }
+LC_FN float fmin(float a, float b) { return fminf(a, b); }
+LC_FN float pow(float a, float b) { return powf(a, b); }
+LC_FN float fmod(float a, float b) { return fmodf(a, b); }
+LC_FN float log2(float x) { return log2f(x); }
+LC_FN float exp2(float x) { return exp2f(x); }
+LC_FN float round(float x) { return roundf(x); }
+#elif !defined(LC_METAL)
 using std::sqrt; using std::cos; using std::sin; using std::floor; using std::fabs;
 using std::fmax; using std::fmin; using std::pow; using std::fmod; using std::log2;
 using std::exp2; using std::round;
@@ -255,6 +281,14 @@ LC_FN LCColor mipBuildTexel(LC_SRC src, LC_SRC mips, LC_CONST LCParams& P, int k
 LC_FN LCColor loadTexel(LC_SRC m, int i)
 {
     float4 v = *((const device float4*)(m + i));
+    LCColor c;
+    c.r = v.x; c.g = v.y; c.b = v.z; c.a = v.w;
+    return c;
+}
+#elif defined(LC_CUDA)
+LC_FN LCColor loadTexel(LC_SRC m, int i)
+{
+    float4 v = __ldg(reinterpret_cast<const float4*>(m + i));   // texels are 16-byte aligned
     LCColor c;
     c.r = v.x; c.g = v.y; c.b = v.z; c.a = v.w;
     return c;
@@ -586,7 +620,7 @@ LC_FN LCColor shade(LC_CONST LCParams& P, LC_SRC src, LC_SRC mips, int px, int p
     return c;
 }
 
-#ifndef LC_METAL
+#if !defined(LC_METAL) && !defined(LC_CUDA)
 // ---- host side (C++ only) ---------------------------------------------------------------------
 // Lays out the pyramid for P.width × P.height: `levels` levels, stopping early at 1 × 1.
 inline void planMips(LCParams& P, int levels)

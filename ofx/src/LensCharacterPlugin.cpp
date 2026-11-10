@@ -1,4 +1,4 @@
-// LensCharacterPlugin.cpp — OpenFX plugin: parameters, render dispatch (Metal / CPU), lens browser, custom lens.
+// LensCharacterPlugin.cpp — OpenFX plugin: parameters, render dispatch (Metal / CUDA / CPU), lens browser, custom lens.
 //
 // Inspector layout (simple first, detail collapsed):
 //   Lens          Choose Lens… · aperture · input encoding
@@ -23,6 +23,7 @@
 #include "LensBrowser.h"
 #include "LensKernel.h"
 #include "Mixer.h"
+#include "Platform.h"
 #include "Profiles.h"
 
 #define kPluginName "LensCharacter"
@@ -44,6 +45,11 @@ static std::string P(const char* slot, const char* name) { return std::string(sl
 #ifdef __APPLE__
 extern void RunMetalKernel(void* p_CmdQ, const lc::LCParams& p_Params, const float* p_Input, float* p_Output);
 #endif
+#ifdef LC_HAVE_CUDA   // set by the CMake build when the CUDA toolkit is found
+extern int RunCudaKernel(void* p_Stream, const lc::LCParams& p_Params, const float* p_Input, float* p_Output);
+#endif
+
+static void logLine(const char* p_Text);
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -65,10 +71,25 @@ public:
 #endif
     }
 
+    virtual void processImagesCUDA()
+    {
+#ifdef LC_HAVE_CUDA
+        int err = RunCudaKernel(_pCudaStream, m_Params, static_cast<const float*>(m_Src->getPixelData()),
+                                static_cast<float*>(_dstImg->getPixelData()));
+        if (err != 0)
+        {
+            char msg[96];
+            snprintf(msg, sizeof msg, "CUDA render failed (error %d)", err);
+            logLine(msg);
+            throwSuiteStatusException(kOfxStatFailed);
+        }
+#endif
+    }
+
     // CPU path only: build the bokeh pyramid once, before the threads start
     virtual void preProcess()
     {
-        if (_isEnabledMetalRender || m_Params.mipLevels <= 0) return;
+        if (_isEnabledMetalRender || _isEnabledCudaRender || _isEnabledOpenCLRender || m_Params.mipLevels <= 0) return;
         const OfxRectI& b = m_Src->getBounds();
         const float* src = static_cast<const float*>(m_Src->getPixelAddress(b.x1, b.y1));
         lc::LCParams params = m_Params;
@@ -435,27 +456,38 @@ void LensCharacterPlugin::suggestHighlightBoost(double p_Time)
 
 // ---- render ----------------------------------------------------------------------------------
 
+// Appends one line to the plugin's log (see platform::logFilePath)
+static void logLine(const char* p_Text)
+{
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
+    static const std::string path = lc::platform::logFilePath();
+    if (path.empty()) return;
+    if (FILE* f = lc::platform::openFile(path, "a"))
+    {
+        fprintf(f, "%s\n", p_Text);
+        fclose(f);
+    }
+}
+
 // Records how Resolve flags renders (playback, scrubbing, Deliver) the first time each
 // combination appears, so Fast quality can later switch itself off for final renders.
 static void logRenderFlags(const RenderArguments& a)
 {
     static std::mutex mutex;
-    static int seen = 0;
-    int key = 1 | (a.renderQualityDraft ? 2 : 0) | (a.interactiveRenderStatus ? 4 : 0) | (a.sequentialRenderStatus ? 8 : 0) |
-              (a.isEnabledMetalRender ? 16 : 0) | (a.renderScale.x < 0.99 ? 32 : 0);
-    std::lock_guard<std::mutex> lock(mutex);
-    if (seen & (1 << (key & 31))) return;
-    seen |= 1 << (key & 31);
-    const char* home = std::getenv("HOME");
-    if (!home) return;
-    std::string path = std::string(home) + "/Library/Logs/LensCharacter.log";
-    if (FILE* f = fopen(path.c_str(), "a"))
+    static unsigned long long seen = 0;   // one bit per flag combination (6 flags: 64 bits)
+    unsigned key = (a.renderQualityDraft ? 1u : 0u) | (a.interactiveRenderStatus ? 2u : 0u) | (a.sequentialRenderStatus ? 4u : 0u) |
+                   (a.isEnabledMetalRender ? 8u : 0u) | (a.isEnabledCudaRender ? 16u : 0u) | (a.renderScale.x < 0.99 ? 32u : 0u);
     {
-        fprintf(f, "render flags: draft=%d interactive=%d sequential=%d metal=%d scale=%.3f\n",
-                (int)a.renderQualityDraft, (int)a.interactiveRenderStatus, (int)a.sequentialRenderStatus,
-                (int)a.isEnabledMetalRender, a.renderScale.x);
-        fclose(f);
+        std::lock_guard<std::mutex> lock(mutex);
+        if (seen & (1ull << key)) return;
+        seen |= 1ull << key;
     }
+    char line[160];
+    snprintf(line, sizeof line, "render flags: draft=%d interactive=%d sequential=%d metal=%d cuda=%d scale=%.3f",
+             (int)a.renderQualityDraft, (int)a.interactiveRenderStatus, (int)a.sequentialRenderStatus,
+             (int)a.isEnabledMetalRender, (int)a.isEnabledCudaRender, a.renderScale.x);
+    logLine(line);
 }
 
 void LensCharacterPlugin::render(const RenderArguments& p_Args)
@@ -557,6 +589,10 @@ void LensCharacterFactory::describe(ImageEffectDescriptor& p_Desc)
     p_Desc.setSupportsMultipleClipPARs(false);
 #ifdef __APPLE__
     p_Desc.setSupportsMetalRender(true);
+#endif
+#ifdef LC_HAVE_CUDA
+    p_Desc.setSupportsCudaRender(true);
+    p_Desc.setSupportsCudaStream(true);   // render on Resolve's stream, without a sync per frame
 #endif
 }
 

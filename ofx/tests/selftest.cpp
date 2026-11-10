@@ -2,21 +2,55 @@
 //
 //  1. Library loads and lens search finds the expected profiles.
 //  2. Overdrive never produces an invalid (folding) warp, even at absurd settings.
-//  3. CPU and Metal render the same test chart to within float tolerance.
+//  3. CPU and the GPU (Metal on macOS, CUDA where built with it) render the same test chart
+//     to within float tolerance.
 //  4. Writes before/after PPM images to the output directory for a visual check.
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
 #include "../src/LensBrowser.h"
+#include "../src/LensBrowserModel.h"
 #include "../src/LensKernel.h"
 #include "../src/Mixer.h"
+#include "../src/Platform.h"
 #include "../src/Profiles.h"
 
-int LensCharacterRunMetalTest(const lc::LCParams& p_Params, const float* p_In, float* p_Out, double* p_GpuMs = nullptr);
+#if defined(__APPLE__)
+int LensCharacterRunMetalTest(const lc::LCParams& p_Params, const float* p_In, float* p_Out, double* p_GpuMs);
+static const char* const kGpu = "Metal";
+#elif defined(LC_HAVE_CUDA)
+int LensCharacterRunCudaTest(const lc::LCParams& p_Params, const float* p_In, float* p_Out, double* p_GpuMs);
+static const char* const kGpu = "CUDA";
+#else
+static const char* const kGpu = nullptr;   // CPU-only build
+#endif
+
+static std::vector<float> renderCPU(const lc::LCParams& p_Params, const std::vector<float>& src);
+
+// Renders on the GPU. Returns 0 on success. In a CPU-only build, renders on the CPU instead and
+// returns 0, so the checks below still run (the CPU-vs-GPU comparison is skipped).
+static int runGpu(const lc::LCParams& p_Params, const float* p_In, float* p_Out, double* p_GpuMs = nullptr)
+{
+#if defined(__APPLE__)
+    return LensCharacterRunMetalTest(p_Params, p_In, p_Out, p_GpuMs);
+#elif defined(LC_HAVE_CUDA)
+    return LensCharacterRunCudaTest(p_Params, p_In, p_Out, p_GpuMs);
+#else
+    lc::LCParams P = p_Params;
+    P.rowStride = P.width * 4;
+    std::vector<float> in(p_In, p_In + (size_t)P.width * P.height * 4);
+    std::vector<float> out = renderCPU(P, in);
+    std::copy(out.begin(), out.end(), p_Out);
+    if (p_GpuMs) *p_GpuMs = 0.0;
+    return 0;
+#endif
+}
 
 static int s_Failures = 0;
 #define CHECK(cond, ...) do { if (cond) printf("  ok    " __VA_ARGS__); else { printf("  FAIL  " __VA_ARGS__); s_Failures++; } printf("\n"); } while (0)
@@ -51,7 +85,7 @@ static std::vector<float> makeChart(int w, int h)
 
 static void writePPM(const std::string& path, const std::vector<float>& img, int w, int h)
 {
-    FILE* f = fopen(path.c_str(), "wb");
+    FILE* f = lc::platform::openFile(path, "wb");
     if (!f) return;
     fprintf(f, "P6\n%d %d\n255\n", w, h);
     for (int y = h - 1; y >= 0; y--)   // OFX images are bottom-up
@@ -145,9 +179,10 @@ int main(int argc, char** argv)
     std::vector<float> cpu = renderCPU(P, chart);
     auto t1 = std::chrono::steady_clock::now();
     std::vector<float> gpu(chart.size());
-    int rc = LensCharacterRunMetalTest(P, chart.data(), gpu.data());
-    CHECK(rc == 0, "Metal kernel compiled and ran (rc=%d)", rc);
-    if (rc == 0)
+    int rc = runGpu(P, chart.data(), gpu.data());
+    if (kGpu) CHECK(rc == 0, "%s kernel compiled and ran (rc=%d)", kGpu, rc);
+    else printf("  skip  no GPU backend in this build: GPU checks below use the CPU\n");
+    if (rc == 0 && kGpu)
     {
         // Nearest-sample lookups can land on the other side of a pixel boundary when CPU and GPU
         // round differently (e.g. x86 without fused multiply-add), so judge by how many values
@@ -162,12 +197,13 @@ int main(int argc, char** argv)
             if (d > 0.01) visible++;
         }
         double frac = (double)visible / cpu.size();
-        CHECK(sumDiff / cpu.size() < 1e-4 && frac < 1e-4, "CPU vs Metal: mean |diff| %.2e, max %.2e, %zu of %zu values differ by > 0.01",
-              sumDiff / cpu.size(), maxDiff, visible, cpu.size());
+        CHECK(sumDiff / cpu.size() < 1e-4 && frac < 1e-4, "CPU vs %s: mean |diff| %.2e, max %.2e, %zu of %zu values differ by > 0.01",
+              kGpu, sumDiff / cpu.size(), maxDiff, visible, cpu.size());
     }
     printf("  CPU single-thread 960x540: %.0f ms\n", std::chrono::duration<double, std::milli>(t1 - t0).count());
 
     // GPU timing at UHD: the old approach against each quality mode
+    if (kGpu && rc == 0)
     {
         const int W4 = 3840, H4 = 2160;
         std::vector<float> big = makeChart(W4, H4), bigOut(big.size());
@@ -176,10 +212,10 @@ int main(int argc, char** argv)
         for (lc::Slot* sl : {&s4.distortion, &s4.ca, &s4.vignetting, &s4.character}) sl->overdrive = 1.0f;
         auto timeIt = [&](const lc::LCParams& P4) {
             double best = 1e9, ms = 0;
-            for (int i = 0; i < 4; i++) { LensCharacterRunMetalTest(P4, big.data(), bigOut.data(), &ms); best = std::min(best, ms); }
+            for (int i = 0; i < 4; i++) { runGpu(P4, big.data(), bigOut.data(), &ms); best = std::min(best, ms); }
             return best;
         };
-        printf("  GPU time per UHD frame, Helios, Sharp Centre (best of 4):\n");
+        printf("  %s time per UHD frame, Helios, Sharp Centre (best of 4):\n", kGpu);
         for (float defocus : {3.0f, 8.0f})
         {
             s4.defocus = defocus;
@@ -291,7 +327,7 @@ int main(int argc, char** argv)
                 lc::LCParams Pold = Pb;
                 Pold.mipLevels = 0;   // the old point sampling, for comparison
                 std::vector<float> gpuB(scene.size());
-                int rcB = LensCharacterRunMetalTest(Pb, scene.data(), gpuB.data());
+                int rcB = runGpu(Pb, scene.data(), gpuB.data());
                 std::vector<float> cpuB = renderCPU(Pb, scene), oldB = renderCPU(Pold, scene);
                 double cvNew, spreadNew, cvOld, spreadOld, cvGpu, spreadGpu;
                 measure(cpuB, Pb.defocusPx, &cvNew, &spreadNew);
@@ -299,8 +335,8 @@ int main(int argc, char** argv)
                 measure(gpuB, Pb.defocusPx, &cvGpu, &spreadGpu);
                 const char* lens = plain ? "plain lens" : "Helios";
                 CHECK(rcB == 0 && cvNew < 0.10 && cvGpu < 0.10 && cvNew < cvOld * 0.25,
-                      "%s, Highlight Boost %.0f: variation inside the disc %.1f%% CPU, %.1f%% Metal (point samples: %.1f%%)",
-                      lens, boost, cvNew * 100, cvGpu * 100, cvOld * 100);
+                      "%s, Highlight Boost %.0f: variation inside the disc %.1f%% CPU, %.1f%% %s (point samples: %.1f%%)",
+                      lens, boost, cvNew * 100, cvGpu * 100, kGpu ? kGpu : "CPU", cvOld * 100);
                 if (plain)
                     CHECK(spreadNew < 0.03 && spreadGpu < 0.03,
                           "%s, Highlight Boost %.0f: same light at three pixel offsets, discs within %.1f%% (point samples: %.1f%%)",
@@ -324,7 +360,7 @@ int main(int argc, char** argv)
             Pg.glow = 0.5f;
             lc::planMips(Pg, LC_MAX_MIPS);
             std::vector<float> gpuG(scene.size());
-            int rcG = LensCharacterRunMetalTest(Pg, scene.data(), gpuG.data());
+            int rcG = runGpu(Pg, scene.data(), gpuG.data());
             std::vector<float> cpuG = renderCPU(Pg, scene);
             auto halo = [&](const std::vector<float>& img, int n) {
                 double e = 0;
@@ -354,11 +390,47 @@ int main(int argc, char** argv)
         lc::BrowserRequest req;
         req.title = "Choose Lens";
         req.aperture = 2.0f;
+        lc::BrowserModel m(req);
+        m.filter(m.categoryIndex(lc::kCategoryAll), "");
+        CHECK(m.rowCount() == lib.size() && m.categoryCount() > 10, "%zu lenses listed under %zu categories", m.rowCount(), m.categoryCount());
+        m.filter(m.categoryIndex(lc::kCategoryPresets), "");
+        bool presetsOk = m.rowCount() > 5;
+        for (size_t r = 0; r < m.rowCount(); r++) presetsOk = presetsOk && m.rowProfile(r)->source == "builtin";
+        CHECK(presetsOk, "%s: %zu built-in presets", lc::kCategoryPresets, m.rowCount());
+        m.filter(m.categoryIndex("Sigma"), "85");
+        bool sigmaOk = m.rowCount() > 0;
+        for (size_t r = 0; r < m.rowCount(); r++)
+            sigmaOk = sigmaOk && m.rowProfile(r)->maker == "Sigma" && m.cell(r, lc::COL_NAME).find("85") != std::string::npos;
+        CHECK(sigmaOk, "Sigma + \"85\": %zu lenses, first \"%s\"", m.rowCount(), m.rowCount() ? m.cell(0, lc::COL_NAME).c_str() : "");
+        m.filter(0, "helios 44");
+        int row = m.rowOf("builtin:Helios 44-2 58mm (character)");
+        CHECK(row == 0 && m.cell(0, lc::COL_DATA).find("Bokeh") != std::string::npos, "\"helios 44\" lists the preset first (row %d, %s, %s)",
+              row, m.rowCount() ? m.cell(0, lc::COL_FOCAL).c_str() : "", m.rowCount() ? m.cell(0, lc::COL_DATA).c_str() : "");
+
+        // The Windows browser's preview is drawn in software; render it here too for a visual check
+        const int PW = 300, PH = 700;
+        std::vector<unsigned char> bgra((size_t)PW * PH * 4);
+        std::vector<lc::PreviewText> texts;
+        lc::renderPreview(helios.get(), 2.0f, PW, PH, 1.0f, bgra.data(), texts);
+        std::vector<float> img((size_t)PW * PH * 4);
+        for (int y = 0; y < PH; y++)   // writePPM expects bottom-up RGB
+            for (int x = 0; x < PW; x++)
+                for (int c = 0; c < 3; c++)
+                    img[((size_t)(PH - 1 - y) * PW + x) * 4 + c] = bgra[((size_t)y * PW + x) * 4 + 2 - c] / 255.0f;
+        writePPM(outDir + "/browser_preview_sw.ppm", img, PW, PH);
+        CHECK(texts.size() == 6, "software preview: %zu text blocks, written to %s/browser_preview_sw.ppm", texts.size(), outDir.c_str());
+    }
+#ifdef __APPLE__
+    {
+        lc::BrowserRequest req;
+        req.title = "Choose Lens";
+        req.aperture = 2.0f;
         bool a = lc::snapshotLensBrowser(req, "All Lenses", "", "builtin:Helios 44-2 58mm (character)", outDir + "/browser_all.png");
         bool b = lc::snapshotLensBrowser(req, "Character Presets", "", "builtin:Petzval 85mm (character)", outDir + "/browser_presets.png");
         bool c = lc::snapshotLensBrowser(req, "Sigma", "85", "", outDir + "/browser_search.png");
         CHECK(a && b && c, "browser rendered offscreen to %s/browser_*.png", outDir.c_str());
     }
+#endif
 
     // Real-lens settings, no defocus: vintage presets should still show soft, swirly corners
     {
@@ -370,7 +442,7 @@ int main(int argc, char** argv)
             lc::ProfilePtr lens = lib.findById(id);
             for (lc::Slot* sl : {&e.distortion, &e.ca, &e.vignetting, &e.character}) sl->a = lens;
             std::vector<float> out(chart.size());
-            LensCharacterRunMetalTest(lc::buildParams(e), chart.data(), out.data());
+            runGpu(lc::buildParams(e), chart.data(), out.data());
             std::string name = std::string(id).find("Petzval") != std::string::npos ? "petzval" : "helios";
             writePPM(outDir + "/edges_" + name + "_defocus0.ppm", out, W, H);
         }
@@ -378,7 +450,7 @@ int main(int argc, char** argv)
 
     writePPM(outDir + "/selftest_before.ppm", chart, W, H);
     writePPM(outDir + "/selftest_after_cpu.ppm", cpu, W, H);
-    if (rc == 0) writePPM(outDir + "/selftest_after_metal.ppm", gpu, W, H);
+    if (rc == 0 && kGpu) writePPM(outDir + "/selftest_after_gpu.ppm", gpu, W, H);
 
     printf(s_Failures ? "\n%d check(s) failed\n" : "\nAll checks passed\n", s_Failures);
     return s_Failures ? 1 : 0;

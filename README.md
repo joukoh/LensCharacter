@@ -1,6 +1,6 @@
 # LensCharacter
 
-A free lens-emulation plugin for DaVinci Resolve on macOS. Pick from 1,500+ measured lenses and character presets, then add their distortion, chromatic aberration, vignetting, bokeh, swirl and glow to your footage. You can take individual traits from different lenses and push them past what the real glass does.
+A free lens-emulation plugin for DaVinci Resolve on macOS and Windows. Pick from 1,500+ measured lenses and character presets, then add their distortion, chromatic aberration, vignetting, bokeh, swirl and glow to your footage. You can take individual traits from different lenses and push them past what the real glass does.
 
 - **Measured lenses**: real distortion, colour fringing and vignetting for 1,540 lenses from the [Lensfun](https://github.com/lensfun/lensfun) database
 - **Character presets**: hand-built bokeh, cat-eye, swirl and glow for lenses like the Helios 44-2, Petzval, Trioplan and Super Takumar, linked to measured geometry where it exists
@@ -9,11 +9,11 @@ A free lens-emulation plugin for DaVinci Resolve on macOS. Pick from 1,500+ meas
 - **Overdrive**: push any trait past the real lens without breaking the image
 - **Real aperture behaviour**: stopping down shrinks the blur, fades cat-eye and swirl, and shows the iris blades
 - **Custom lenses**: build your own and save it to your library
-- **GPU accelerated** with Metal, plus Fast and Geometry Only modes for smooth playback
+- **GPU accelerated** with Metal on macOS and CUDA on Windows with NVIDIA GPUs, plus Fast and Geometry Only modes for smooth playback
 
 ## Install
 
-Requires a Mac (Apple Silicon or Intel) and DaVinci Resolve. Tested with Resolve Studio 21.1.
+Requires a Mac (Apple Silicon or Intel) and DaVinci Resolve. Tested with Resolve Studio 21.1. For Windows, build from source: see [`ofx/WINDOWS.md`](ofx/WINDOWS.md).
 
 1. Download the latest `LensCharacter-…-mac-universal.pkg` from [Releases](../../releases).
 2. Quit DaVinci Resolve.
@@ -38,7 +38,7 @@ The plugin has no depth information. Blur goes by position (sharp centre, soft e
 
 ## Build from source
 
-Needs the Xcode Command Line Tools and DaVinci Resolve, which ships the OpenFX SDK.
+On Windows, see [`ofx/WINDOWS.md`](ofx/WINDOWS.md). On macOS you need the Xcode Command Line Tools and DaVinci Resolve, which ships the OpenFX SDK.
 
 ```bash
 cd ofx
