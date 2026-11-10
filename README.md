@@ -25,18 +25,20 @@ A free lens-emulation plugin for DaVinci Resolve on macOS and Windows. Pick from
 
 ## Install
 
-Requires a Mac (Apple Silicon or Intel) and DaVinci Resolve. Tested with Resolve Studio 21.1, and on Windows with Resolve 21.2. For Windows, build from source: see [`ofx/WINDOWS.md`](ofx/WINDOWS.md).
+Tested with Resolve Studio 21.1 on macOS and Resolve 21.2 on Windows 11. Both downloads are on this fork's [Releases](../../releases) page. Each one replaces the original LensCharacter if you have it installed.
 
-The installer is published on the original project's Releases page and doesn't include this fork's changes. To get them on a Mac, build from source (below).
+**Windows** (64-bit, NVIDIA GPU for GPU rendering): download `LensCharacter-…-windows-x64.zip` and follow [Install the download](ofx/WINDOWS.md#install-the-download).
 
-1. Download the latest `LensCharacter-…-mac-universal.pkg` from [Releases](https://github.com/kevintosi/LensCharacter/releases).
+**Mac** (Apple Silicon or Intel):
+
+1. Download the latest `LensCharacter-…-mac-universal.pkg` from [Releases](../../releases).
 2. Quit DaVinci Resolve.
 3. Double-click the installer. macOS will say it can't verify the developer, because the installer isn't signed with an Apple Developer ID. Click **Done**.
 4. Open **System Settings → Privacy & Security**, scroll down, click **Open Anyway** next to the LensCharacter message, and enter your password.
 5. Click through the installer.
 6. Open Resolve. The effect is under **Effects → OpenFX → LensCharacter** on the Edit and Color pages.
 
-To check the download, compare its SHA-256 with the one in the release notes (`shasum -a 256 <file>` in Terminal).
+To check a download, compare its SHA-256 with the one in the release notes: `shasum -a 256 <file>` in Terminal on a Mac, `certutil -hashfile <file> SHA256` in a Command Prompt on Windows.
 
 To uninstall, open `/Library/OFX/Plugins` in Finder (⌘⇧G) and move `LensCharacter.ofx.bundle` to the Bin.
 

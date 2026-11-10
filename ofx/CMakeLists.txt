@@ -25,7 +25,7 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     set(CMAKE_CUDA_ARCHITECTURES "75-real;86-real;89-real;89-virtual")
 endif()
 
-project(LensCharacter VERSION 0.4 LANGUAGES CXX)
+project(LensCharacter VERSION 0.4.1 LANGUAGES CXX)
 
 # Resolve 21 installs the SDK under ProgramData; earlier versions put it next to the program
 string(REPLACE "\\" "/" _programData "$ENV{ProgramData}")
@@ -141,3 +141,14 @@ add_test(NAME selftest COMMAND selftest "${CMAKE_BINARY_DIR}")
 set_tests_properties(selftest PROPERTIES ENVIRONMENT "LENSCHARACTER_PROFILES=${BUNDLE}/Contents/Resources/profiles")
 
 install(DIRECTORY "${BUNDLE}" DESTINATION "${OFX_PLUGIN_DIR}")
+
+# Release download: build-win/dist/LensCharacter-<version>-windows-x64.zip, holding the bundle folder
+#   cmake --build build-win --config Release --target release_zip
+set(ZIP "${CMAKE_BINARY_DIR}/dist/LensCharacter-${PROJECT_VERSION}-windows-x64.zip")
+add_custom_target(release_zip
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/dist"
+    COMMAND ${CMAKE_COMMAND} -E rm -f "${ZIP}"
+    COMMAND ${CMAKE_COMMAND} -E tar cf "${ZIP}" --format=zip LensCharacter.ofx.bundle
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+    COMMENT "Packaging ${ZIP}")
+add_dependencies(release_zip LensCharacter)

@@ -1,10 +1,27 @@
-# Building LensCharacter on Windows
+# LensCharacter on Windows
 
 The Windows plugin renders with CUDA on NVIDIA GPUs and falls back to the CPU on other GPUs. The lens maths is the same `LensKernel.h` the Mac build uses, so both platforms give the same picture.
 
-> **Status:** the Windows build is new and has not yet been tested with DaVinci Resolve. Run the self-test first. Please report anything that fails.
+> **Status:** tested with DaVinci Resolve 21.2 on Windows 11 with an RTX 40-series GPU. The Windows version is new: please report anything that fails.
 
-## What you need (one time)
+To use the plugin, install the download (below). You only need the build steps further down to change the code.
+
+## Install the download
+
+You need a 64-bit Windows 10 or 11 PC, DaVinci Resolve, and for GPU rendering an NVIDIA GPU (RTX 20 series or newer) with a current driver. Nothing else: the CUDA runtime is built into the plugin.
+
+1. Download `LensCharacter-…-windows-x64.zip` from [Releases](../../../releases).
+2. Close DaVinci Resolve.
+3. Right-click the zip, choose **Extract All…**, and extract it.
+4. Open `C:\Program Files\Common Files\` in File Explorer. If it has no `OFX\Plugins` folder, create `OFX` and then `Plugins` inside it. Windows asks for administrator permission.
+5. Move the extracted `LensCharacter.ofx.bundle` folder into `C:\Program Files\Common Files\OFX\Plugins\`. If an older LensCharacter is there, replace it.
+6. Open Resolve. The effect is under **Effects → OpenFX → LensCharacter** on the Edit and Color pages. Check **Preferences → System → Memory and GPU → GPU Processing Mode** is *CUDA* or *Auto*.
+
+The plugin isn't code-signed. If Windows' **Smart App Control** is on, it may stop Resolve from loading it.
+
+## Build from source
+
+### What you need (one time)
 
 1. **DaVinci Resolve.** It installs the OpenFX SDK the build uses: Resolve 21 puts it in
    `C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\OpenFX`, older versions in
@@ -18,7 +35,7 @@ The Windows plugin renders with CUDA on NVIDIA GPUs and falls back to the CPU on
    - Your NVIDIA driver must support the toolkit version. Run `nvidia-smi`: the "CUDA Version" it shows must be at least the toolkit's version. If it's lower, update the driver.
    - People who only *use* the plugin need just the NVIDIA driver. The CUDA runtime is built into the plugin.
 
-## Build and test
+### Build and test
 
 Double-click `ofx\build-windows.bat`, or run it from a Command Prompt. It configures the build, compiles into `ofx\build-win\` and runs the self-test.
 
@@ -36,7 +53,7 @@ The test images (`*.ppm`, `browser_preview_sw.ppm`) go to `ofx\build-win\`.
 
 **Shared folder with the Mac:** the Windows build writes only to `ofx\build-win\` and the Mac build only to `ofx/build/`, so one folder can serve both machines. Run `git` from one machine only. If the folder is a network share, the script still works: `pushd` maps a temporary drive letter.
 
-## Install
+### Install your build
 
 Close Resolve, then from an **administrator** Command Prompt:
 

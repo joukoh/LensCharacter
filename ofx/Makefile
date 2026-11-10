@@ -80,7 +80,7 @@ clean:
 	rm -rf build
 
 # Double-clickable installer for sharing: installs into /Library/OFX/Plugins, no Terminal needed.
-VERSION = 0.4
+VERSION = 0.4.1
 PKG     = ../dist/LensCharacter-$(VERSION)-mac-universal.pkg
 
 pkg: $(BUNDLE)
