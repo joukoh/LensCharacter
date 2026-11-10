@@ -1,5 +1,7 @@
 # LensCharacter
 
+> This is a fork of [kevintosi/LensCharacter](https://github.com/kevintosi/LensCharacter) that adds Windows support and some fixes. See [Changes in this fork](#changes-in-this-fork).
+
 A free lens-emulation plugin for DaVinci Resolve on macOS and Windows. Pick from 1,500+ measured lenses and character presets, then add their distortion, chromatic aberration, vignetting, bokeh, swirl and glow to your footage. You can take individual traits from different lenses and push them past what the real glass does.
 
 - **Measured lenses**: real distortion, colour fringing and vignetting for 1,540 lenses from the [Lensfun](https://github.com/lensfun/lensfun) database
@@ -11,11 +13,23 @@ A free lens-emulation plugin for DaVinci Resolve on macOS and Windows. Pick from
 - **Custom lenses**: build your own and save it to your library
 - **GPU accelerated** with Metal on macOS and CUDA on Windows with NVIDIA GPUs, plus Fast and Geometry Only modes for smooth playback
 
+## Changes in this fork
+
+- **Windows with NVIDIA GPUs**: a CUDA render path (about 17 ms per UHD frame at Full quality on an RTX 40-series card), the lens browser on Windows, and a Visual Studio and CMake build. See [`ofx/WINDOWS.md`](ofx/WINDOWS.md).
+- **Faster on the Mac**: a Full quality frame takes about 40% less GPU time, and Fast about 25% less.
+- **Smoother bokeh and glow**: no more dotted bokeh discs from small bright lights with DaVinci Intermediate input, and small Defocus values now blur the image instead of doing nothing.
+- **Sharp Area Softness**: a new slider that slightly softens the in-focus area, for digital footage that looks too crisp.
+- **Highlight Boost follows Input Encoding**: 3 for Gamma 2.4, 0 for DaVinci Intermediate, unless you've set your own value.
+- **Lens browser**: the list columns fit the window, and the My Lenses count is no longer one too high.
+- **Build**: the first `make` from a clean checkout no longer fails.
+
 ## Install
 
-Requires a Mac (Apple Silicon or Intel) and DaVinci Resolve. Tested with Resolve Studio 21.1. For Windows, build from source: see [`ofx/WINDOWS.md`](ofx/WINDOWS.md).
+Requires a Mac (Apple Silicon or Intel) and DaVinci Resolve. Tested with Resolve Studio 21.1, and on Windows with Resolve 21.2. For Windows, build from source: see [`ofx/WINDOWS.md`](ofx/WINDOWS.md).
 
-1. Download the latest `LensCharacter-…-mac-universal.pkg` from [Releases](../../releases).
+The installer is published on the original project's Releases page and doesn't include this fork's changes. To get them on a Mac, build from source (below).
+
+1. Download the latest `LensCharacter-…-mac-universal.pkg` from [Releases](https://github.com/kevintosi/LensCharacter/releases).
 2. Quit DaVinci Resolve.
 3. Double-click the installer. macOS will say it can't verify the developer, because the installer isn't signed with an Apple Developer ID. Click **Done**.
 4. Open **System Settings → Privacy & Security**, scroll down, click **Open Anyway** next to the LensCharacter message, and enter your password.
